@@ -27,7 +27,6 @@ from joblib import Parallel, delayed
 # Parameters.
 append_results = False
 response_win = (0, 0.300)
-response_win = (0, 0.300)
 baseline_win = (-1, 0)
 nshuffles = 1000
 
@@ -67,10 +66,6 @@ for mouse_id in mice_list:
     data_post = data_mapping.sel(trial=data_mapping.coords['day'].isin([1, 2]))
     data_post = data_post.sel(time=slice(*response_win)).mean(dim='time')
 
-    # Remove nan from wrong trials.
-
-
-    lmi, lmi_p = utils_imaging.compute_roc(data_pre, data_post, nshuffles=nshuffles)
     lmi, lmi_p = utils_imaging.compute_roc(data_pre, data_post, nshuffles=nshuffles)
     df.append(pd.DataFrame({'mouse_id': mouse_id,
                             'roi': data_mapping.roi.values,

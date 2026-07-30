@@ -54,7 +54,7 @@ SURROGATE_MODE = 'mouse'    # 'day' | 'mouse' | 'both'
 DAYS = [-2, -1, 0, 1, 2]
 PRELEARNING_DAYS = [-2, -1]
 N_SURROGATES = 1000
-PERCENTILES = [99]
+PERCENTILES = [99, 99.5, 99.9]
 N_JOBS = 35
 
 # --- Part 2: Detection ---
@@ -880,6 +880,7 @@ if __name__ == '__main__':
         print("\nSkipping surrogate computation (RUN_SURROGATES=False).")
 
     # ------------------------------------------------------------------
-    # Part 2: Reactivation event detection
+    # Part 2: Reactivation event detection, one run per percentile
     # ------------------------------------------------------------------
-    run_reactivation_detection(r_plus_mice, r_minus_mice)
+    for percentile in PERCENTILES:
+        run_reactivation_detection(r_plus_mice, r_minus_mice, percentile=percentile)

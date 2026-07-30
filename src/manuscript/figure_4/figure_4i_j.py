@@ -55,7 +55,7 @@ N_JOBS = 35
 # TIME_WINDOW and REACTIVATION_RESULTS_FILE are derived from this flag so the
 # two can never get out of sync — event indices in REACTIVATION_RESULTS_FILE
 # are only valid for the exact trial selection that produced them.
-NO_LICK_ONLY = True
+NO_LICK_ONLY = False
 
 RESULTS_DIR = os.path.join(io.processed_dir, 'reactivation')
 NOLICK_RESULTS_DIR = os.path.join(RESULTS_DIR, 'nolick')

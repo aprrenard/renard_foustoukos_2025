@@ -30,19 +30,22 @@ from src.utils.utils_plot import reward_palette
 
 DAYS = [-2, -1, 0, 1, 2]
 
-RESULTS_FILE = os.path.join(io.processed_dir, 'reactivation', 'reactivation_results_p99.pkl')
 OUTPUT_DIR = os.path.join(io.manuscript_output_dir, 'figure_4', 'output')
 
-# What to (re)generate when running this script directly.
-#   RUN_ORIGINAL         : original all no_stim trials, p99 (figure_4h)
-#   RUN_NOLICK_VARIANTS  : no_stim & lick_flag==0 trials, ±2s window, at
-#                          p99/p995/p999 (figure_4h_nolick_p99/p995/p999) —
-#                          see reactivation_preprocessing_nolick.py
-RUN_ORIGINAL = False
-RUN_NOLICK_VARIANTS = True
+# Trial-selection toggle (mirrors figure_4i_j.py's NO_LICK_ONLY).
+#   True  : no_stim & lick_flag==0 trials, ±2s window (2026 revision
+#           baseline) -- regenerates figure_4h_nolick_p99/p995/p999
+#           (see reactivation_preprocessing_nolick.py)
+#   False : original all no_stim trials, full window (pre-revision
+#           baseline) -- regenerates figure_4h (p99, unsuffixed, original
+#           name) plus figure_4h_p995/p999
+#           (see reactivation_preprocessing.py, PERCENTILES)
+# Both branches are checked at the same three detection percentiles.
+NO_LICK_ONLY = False
 
-NOLICK_RESULTS_DIR = os.path.join(io.processed_dir, 'reactivation', 'nolick')
-NOLICK_PERCENTILES = ['p99', 'p995', 'p999']
+RESULTS_DIR = os.path.join(io.processed_dir, 'reactivation')
+NOLICK_RESULTS_DIR = os.path.join(RESULTS_DIR, 'nolick')
+PERCENTILES = ['p99', 'p995', 'p999']
 
 
 # ============================================================================
@@ -224,13 +227,18 @@ def _load_and_plot(results_file, filename):
 
 
 if __name__ == '__main__':
-    if RUN_ORIGINAL:
-        # Original all-no_stim, p99 baseline (unchanged, kept reproducible).
-        _load_and_plot(RESULTS_FILE, filename='figure_4h')
-
-    if RUN_NOLICK_VARIANTS:
+    if NO_LICK_ONLY:
         # No-lick, ±2s baseline at three detection percentiles (99, 99.5, 99.9).
-        for pstr in NOLICK_PERCENTILES:
+        for pstr in PERCENTILES:
             results_file = os.path.join(
                 NOLICK_RESULTS_DIR, f'reactivation_results_{pstr}.pkl')
             _load_and_plot(results_file, filename=f'figure_4h_nolick_{pstr}')
+    else:
+        # Original all-no_stim, full window, at the same three detection
+        # percentiles. p99 keeps the original unsuffixed filename (kept
+        # reproducible); p995/p999 are the added robustness-check variants.
+        for pstr in PERCENTILES:
+            results_file = os.path.join(
+                RESULTS_DIR, f'reactivation_results_{pstr}.pkl')
+            filename = 'figure_4h' if pstr == 'p99' else f'figure_4h_{pstr}'
+            _load_and_plot(results_file, filename=filename)

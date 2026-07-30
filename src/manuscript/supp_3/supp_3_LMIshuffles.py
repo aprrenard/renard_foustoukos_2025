@@ -46,7 +46,7 @@ from src.utils.utils_plot import reward_palette
 
 RESPONSE_WIN = (0, 0.300)
 BASELINE_WIN = (-1, 0)
-N_SHUFFLES = 1000
+N_SHUFFLES = 100
 DAYS = ['-2', '-1', '0', '+1', '+2']
 
 PROCESSED_DATA_DIR = io.solve_common_paths('processed_data')
@@ -141,11 +141,17 @@ def load_null_lmi_distribution():
 def load_real_lmi():
     """Load real LMI values and assign reward groups (mirrors figure_3f_g.py)."""
     lmi_df = pd.read_csv(LMI_RESULTS_CSV)
+    lmi_mice = set(lmi_df['mouse_id'].unique())
     _, _, mice, _ = io.select_sessions_from_db(io.db_path, io.nwb_dir, two_p_imaging='yes')
+    print(f"  lmi_results.csv mice ({len(lmi_mice)}): {sorted(lmi_mice)}")
+    print(f"  DB two_p_imaging=='yes' mice ({len(mice)}): {sorted(mice)}")
+    print(f"  Overlap: {len(lmi_mice & set(mice))} mice")
     for mouse in lmi_df['mouse_id'].unique():
         lmi_df.loc[lmi_df['mouse_id'] == mouse, 'reward_group'] = \
             io.get_mouse_reward_group_from_db(io.db_path, mouse)
     lmi_df = lmi_df.loc[lmi_df['mouse_id'].isin(mice)]
+    print(f"  lmi_df after DB filter: {len(lmi_df)} rows, "
+          f"reward_group counts: {lmi_df['reward_group'].value_counts(dropna=False).to_dict()}")
     return lmi_df
 
 
