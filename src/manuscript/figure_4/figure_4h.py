@@ -33,6 +33,17 @@ DAYS = [-2, -1, 0, 1, 2]
 RESULTS_FILE = os.path.join(io.processed_dir, 'reactivation', 'reactivation_results_p99.pkl')
 OUTPUT_DIR = os.path.join(io.manuscript_output_dir, 'figure_4', 'output')
 
+# What to (re)generate when running this script directly.
+#   RUN_ORIGINAL         : original all no_stim trials, p99 (figure_4h)
+#   RUN_NOLICK_VARIANTS  : no_stim & lick_flag==0 trials, ±2s window, at
+#                          p99/p995/p999 (figure_4h_nolick_p99/p995/p999) —
+#                          see reactivation_preprocessing_nolick.py
+RUN_ORIGINAL = False
+RUN_NOLICK_VARIANTS = True
+
+NOLICK_RESULTS_DIR = os.path.join(io.processed_dir, 'reactivation', 'nolick')
+NOLICK_PERCENTILES = ['p99', 'p995', 'p999']
+
 
 # ============================================================================
 # Helpers
@@ -57,15 +68,19 @@ def panel_h_reactivation_rate(
     r_minus_results,
     days=DAYS,
     output_dir=OUTPUT_DIR,
+    filename='figure_4h',
     save_format='svg',
     dpi=300,
 ):
     """
-    Generate Figure 4 Panel j: reactivation frequency per day, R+ vs R-.
+    Generate Figure 4 Panel h: reactivation frequency per day, R+ vs R-.
+
+    Args:
+        filename: Output filename stem (without extension).
 
     Saves:
-        figure_4h_data.csv: mouse_id, reward_group, day, event_frequency
-        figure_4h_stats.csv: Mann-Whitney U results per day
+        <filename>_data.csv: mouse_id, reward_group, day, event_frequency
+        <filename>_stats.csv: Mann-Whitney U results per day
     """
     sns.set_theme(context='paper', style='ticks', palette='deep',
                   font='sans-serif', font_scale=1)
@@ -172,36 +187,50 @@ def panel_h_reactivation_rate(
     plt.tight_layout()
 
     os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f'figure_4h.{save_format}'),
+    plt.savefig(os.path.join(output_dir, f'{filename}.{save_format}'),
                 format=save_format, dpi=dpi, bbox_inches='tight')
     plt.close()
-    print(f"Figure 4h saved to: {os.path.join(output_dir, 'figure_4h.' + save_format)}")
+    print(f"Figure saved to: {os.path.join(output_dir, filename + '.' + save_format)}")
 
     # Save CSVs
     df[df['mouse_id'] != ''].to_csv(
-        os.path.join(output_dir, 'figure_4h_data.csv'), index=False)
+        os.path.join(output_dir, f'{filename}_data.csv'), index=False)
     pd.DataFrame(stats_rows).to_csv(
-        os.path.join(output_dir, 'figure_4h_stats.csv'), index=False)
-    print(f"Figure 4h data/stats saved to: {output_dir}")
+        os.path.join(output_dir, f'{filename}_stats.csv'), index=False)
+    print(f"Data/stats saved to: {output_dir}")
 
 
 # ============================================================================
 # Main execution
 # ============================================================================
 
-if __name__ == '__main__':
-    print(f"Loading reactivation results from: {RESULTS_FILE}")
-    if not os.path.exists(RESULTS_FILE):
+def _load_and_plot(results_file, filename):
+    print(f"Loading reactivation results from: {results_file}")
+    if not os.path.exists(results_file):
         raise FileNotFoundError(
-            f"Results file not found: {RESULTS_FILE}\n"
-            "Please run reactivation.py with mode='compute' first."
+            f"Results file not found: {results_file}\n"
+            "Please run reactivation_preprocessing.py / "
+            "reactivation_preprocessing_nolick.py with mode='compute' first."
         )
 
-    with open(RESULTS_FILE, 'rb') as f:
+    with open(results_file, 'rb') as f:
         results_data = pickle.load(f)
 
     r_plus_results = results_data['r_plus_results']
     r_minus_results = results_data['r_minus_results']
     print(f"Loaded results for {len(r_plus_results)} R+ mice and {len(r_minus_results)} R- mice")
 
-    panel_h_reactivation_rate(r_plus_results, r_minus_results)
+    panel_h_reactivation_rate(r_plus_results, r_minus_results, filename=filename)
+
+
+if __name__ == '__main__':
+    if RUN_ORIGINAL:
+        # Original all-no_stim, p99 baseline (unchanged, kept reproducible).
+        _load_and_plot(RESULTS_FILE, filename='figure_4h')
+
+    if RUN_NOLICK_VARIANTS:
+        # No-lick, ±2s baseline at three detection percentiles (99, 99.5, 99.9).
+        for pstr in NOLICK_PERCENTILES:
+            results_file = os.path.join(
+                NOLICK_RESULTS_DIR, f'reactivation_results_{pstr}.pkl')
+            _load_and_plot(results_file, filename=f'figure_4h_nolick_{pstr}')

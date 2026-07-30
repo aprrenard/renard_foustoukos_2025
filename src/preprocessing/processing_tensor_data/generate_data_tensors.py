@@ -13,12 +13,11 @@ import yaml
 import xarray as xr
 import scipy.stats as stats
 
-# sys.path.append('H:\\anthony\\repos\\NWB_analysis')
-sys.path.append(r'/home/aprenard/repos/NWB_analysis')
 sys.path.append(r'/home/aprenard/repos/fast-learning')
 import src.utils.utils_io as io
-from analysis.psth_analysis import make_events_aligned_array_3d
-import nwb_wrappers.nwb_reader_functions as nwb_read
+from cicada_nwb import NWBSession
+import src.utils.utils_imaging as utils_imaging
+from src.utils.utils_two_photons import make_events_aligned_array_3d
 from src.utils.utils_behavior import make_behavior_table
 
 
@@ -57,7 +56,7 @@ for mouse in mice_list:
     save_dir = os.path.join(processed_data_dir, 'mice', mouse)
     # Check if dataset is already created.
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, 'tensor_xarray_learning_quietwindow.nc')
+    save_path = os.path.join(save_dir, 'tensor_xarray_learning_data.nc')
     # if os.path.exists(save_path_data):
     #     continue
     session_nwb = [nwb for nwb in nwb_list if mouse in nwb]
@@ -66,16 +65,17 @@ for mouse in mice_list:
     sessions = []
     data = []
     metadatas = []
+    kept_trial_ids = []  # (session_id, trial_id) kept per session, in tensor order
 
     for nwb_file in session_nwb:
-        
+
         session_id = nwb_file[-25:-4]
         sessions.append(session_id)
-        
+
         # Parameters for tensor array.
         cell_types = ['na', 'wM1', 'wS2']
         rrs_keys = ['ophys', 'fluorescence_all_cells', 'dff']
-        time_range = (5,1)
+        time_range = (2,7)
         epoch_name = None
         trial_selection = None
 
@@ -92,20 +92,53 @@ for mouse in mice_list:
                                                         cell_types,
                                                         idx_selection)
 
+        # Drop trials whose event window extends beyond the recording
+        # boundary (align_array_to_events leaves these entirely NaN across
+        # all cells and timepoints rather than dropping them). Keep
+        # metadata['trials'] (trial IDs) in sync so behav_table can be
+        # filtered/reordered to match below -- behav_table is built
+        # independently (via stop_flag_yaml) and assigned onto the tensor
+        # by position, so it must exactly match which trials survive here.
+        all_nan_trials = np.isnan(traces).all(axis=(0, 2))
+        if all_nan_trials.any():
+            print(f'  Dropping {all_nan_trials.sum()} trial(s) with event '
+                  f'window beyond recording boundary.')
+            traces = traces[:, ~all_nan_trials, :]
+            metadata['trials'] = metadata['trials'][~all_nan_trials]
+
         data.append(traces)
         metadatas.append(metadata)
-    
-    # Sessions are concatenated on the trial dim.
-    tensor = np.concatenate(data, axis=1)
+        kept_trial_ids.append(pd.DataFrame({
+            'session_id': session_id, 'trial_id': metadata['trials']}))
 
-    # Load trial table and compute performance for those sessions.
+    # Sessions are concatenated on the trial dim. Different sessions can
+    # yield a slightly different number of timepoints (per-session sampling
+    # rate jitter rounds differently in align_array_to_timestamps), so
+    # truncate all sessions to the shortest common time length first.
+    n_t_per_session = [d.shape[2] for d in data]
+    min_n_t = min(n_t_per_session)
+    if len(set(n_t_per_session)) > 1:
+        print(f'  Truncating sessions to common length: {min_n_t} timepoints '
+              f'(session lengths: {n_t_per_session})')
+        data = [d[:, :, :min_n_t] for d in data]
+    tensor = np.concatenate(data, axis=1)
+    kept_trial_ids = pd.concat(kept_trial_ids, ignore_index=True)
+
+    # Load trial table and compute performance for those sessions, then
+    # filter+reorder it to exactly the trials kept in the tensor above
+    # (same session_id/trial_id, same order -- required since it gets
+    # assigned onto the 'trial' dim by position, not by an explicit join).
     print('Make behavior table')
     behav_table = make_behavior_table(session_nwb, sessions, db_path,
                                       cut_session=True,
                                       stop_flag_yaml=stop_flag_yaml,
                                       trial_indices_yaml=trial_indices_yaml)
-        
-    time = np.linspace(-time_range[0], time_range[1], traces.shape[2])
+    behav_table = behav_table.set_index(['session_id', 'trial_id'])
+    behav_table = behav_table.loc[
+        list(kept_trial_ids.itertuples(index=False, name=None))
+    ].reset_index()
+
+    time = np.linspace(-time_range[0], time_range[1], tensor.shape[2])
     # Create xarray.
     ds = xr.DataArray(tensor, dims=['cell', 'trial', 'time'],
                         coords={'roi': ('cell', metadata['rois']),
@@ -188,19 +221,40 @@ for mouse in mice_list:
                                                         idx_selection)
 
         print(f'{np.isnan(traces).sum()} nan values in tensor.')
-        
+
+        # Drop trials whose event window extends beyond the recording
+        # boundary: align_array_to_events leaves these entirely NaN (all
+        # cells, all timepoints) rather than dropping them, which happens
+        # occasionally for mapping trials since they are collected at the
+        # end of the session. Same idiom as utils_imaging.extract_trials().
+        all_nan_trials = np.isnan(traces).all(axis=(0, 2))
+        if all_nan_trials.any():
+            print(f'  Dropping {all_nan_trials.sum()} trial(s) with event '
+                  f'window beyond recording boundary.')
+            traces = traces[:, ~all_nan_trials, :]
+
         data.append(traces)
         metadatas.append(metadata)
         # Get session day.
         # I don't load the trial table with the mapping trials, so get it for
         # nwb file.
-        d = nwb_read.get_session_metadata(nwb_file)['day']
+        with NWBSession(nwb_file) as nwb_session:
+            _, d = nwb_session.petersen.get_bhv_type_and_training_day_index()
         behavior_days.extend([d for _ in range(traces.shape[1])])
         
-    # Sessions are concatenated on the trial dim.
+    # Sessions are concatenated on the trial dim. Different sessions can
+    # yield a slightly different number of timepoints (per-session sampling
+    # rate jitter rounds differently in align_array_to_timestamps), so
+    # truncate all sessions to the shortest common time length first.
+    n_t_per_session = [d.shape[2] for d in data]
+    min_n_t = min(n_t_per_session)
+    if len(set(n_t_per_session)) > 1:
+        print(f'  Truncating sessions to common length: {min_n_t} timepoints '
+              f'(session lengths: {n_t_per_session})')
+        data = [d[:, :, :min_n_t] for d in data]
     tensor = np.concatenate(data, axis=1)
-    
-    time = np.linspace(-time_range[0], time_range[1], traces.shape[2])
+
+    time = np.linspace(-time_range[0], time_range[1], tensor.shape[2])
     # Create xarray.
     ds = xr.DataArray(tensor, dims=['cell', 'trial', 'time'],
                         coords={'roi': ('cell', metadata['rois']),
@@ -260,78 +314,76 @@ for mouse_id in mice_list:
     xarr.to_netcdf(save_path)
 
 
+# #############################################################################
+# Lick-aligned xarrays.
+# #############################################################################
 
+db_path = io.solve_common_paths('db')
+db = io.read_excel_db(db_path)
+nwb_path = io.solve_common_paths('nwb')
+processed_dir = os.path.join(io.solve_common_paths('processed_data'), 'mice')
 
-# # #############################################################################
-# # Lick-aligned xarrays.
-# # #############################################################################
+days = ['-2', '-1', '0', '+1', '+2']
+_, _, mice_list, _ = io.select_sessions_from_db(db_path, nwb_path,
+                                                exclude_cols=['exclude', 'two_p_exclude'],
+                                                experimenters=['AR', 'GF', 'MI'],
+                                                day=days,
+                                                two_p_imaging='yes',)
 
-# db_path = io.solve_common_paths('db')
-# db = io.read_excel_db(db_path)
-# nwb_path = io.solve_common_paths('nwb')
-# processed_dir = os.path.join(io.solve_common_paths('processed_data'), 'mice')
+# mouse = 'GF305'
+# mice_list = mice_list[-8:]
+# mice_list = mice_list[-8:]
 
-# days = ['-2', '-1', '0', '+1', '+2']
-# _, _, mice_list, _ = io.select_sessions_from_db(db_path, nwb_path,
-#                                                 exclude_cols=['exclude', 'two_p_exclude'],
-#                                                 experimenters=['AR', 'GF', 'MI'],
-#                                                 day=days,
-#                                                 two_p_imaging='yes',)
+for mouse in mice_list:
+    print(f'Processing lick aligned array for {mouse}')
+    file_name = 'tensor_xarray_learning_data.nc'
+    xarray = utils_imaging.load_mouse_xarray(mouse, processed_dir, file_name, substracted=True)
+    rew_gp = io.get_mouse_reward_group_from_db(db_path, mouse, db)
 
-# # mouse = 'GF305'
-# # mice_list = mice_list[-8:]
-# # mice_list = mice_list[-8:]
-
-# for mouse in mice_list:
-#     print(f'Processing lick aligned array for {mouse}')
-#     file_name = 'tensor_xarray_learning_data.nc'
-#     xarray = utils_imaging.load_mouse_xarray(mouse, processed_dir, file_name, substracted=True)
-#     rew_gp = io.get_mouse_reward_group_from_db(db_path, mouse, db)
-
-#     lick_times = xarray.coords['lick_time'].values
-#     stim_onset = xarray.coords['stim_onset'].values
-#     reaction_time = lick_times - stim_onset
-#     # GF333 and GF334 have a few strange reaction times.
-#     reaction_time[reaction_time>=1.25] = np.nan
-#     # plt.plot(reaction_time)
-#     # plt.show()
+    lick_times = xarray.coords['lick_time'].values
+    stim_onset = xarray.coords['stim_onset'].values
+    reaction_time = lick_times - stim_onset
+    # GF333 and GF334 have a few strange reaction times.
+    reaction_time[reaction_time>=1.25] = np.nan
+    # plt.plot(reaction_time)
+    # plt.show()
         
-#     # Create a new xarray for lick-aligned traces
-#     time = xarray.coords['time'].values
-#     aligned_time = np.linspace(-1, 5, 180)
-#     aligned_traces = []
+    # Create a new xarray for lick-aligned traces
+    time = xarray.coords['time'].values
+    aligned_time = np.linspace(-1, 5, 180)
+    aligned_traces = []
 
-#     for itrial in range(xarray.shape[1]):
-#         lick_onset = reaction_time[itrial]
-#         # Trials with no lick are set to nan.
-#         if np.isnan(lick_onset):
-#             aligned_traces.append(np.full((xarray.shape[0], 180), np.nan))
-#             continue 
-#         lick_onset_idx =  (np.abs(time - lick_onset)).argmin()
-#         data = xarray[:, itrial, :].values
-#         aligned_data = data[:, lick_onset_idx-30:lick_onset_idx+150]
+    for itrial in range(xarray.shape[1]):
+        lick_onset = reaction_time[itrial]
+        # Trials with no lick are set to nan.
+        if np.isnan(lick_onset):
+            aligned_traces.append(np.full((xarray.shape[0], 180), np.nan))
+            continue 
+        lick_onset_idx =  (np.abs(time - lick_onset)).argmin()
+        data = xarray[:, itrial, :].values
+        aligned_data = data[:, lick_onset_idx-30:lick_onset_idx+150]
         
-#         # Two samples missing sometimes for late licks.
-#         if aligned_data.shape[1] < 180:
-#             pad_width = 180 - aligned_data.shape[1]
-#             pad_values = np.repeat(aligned_data[:, -1][:, np.newaxis], pad_width, axis=1)
-#             aligned_data = np.concatenate([aligned_data, pad_values], axis=1)
-#         aligned_traces.append(aligned_data)
+        # Two samples missing sometimes for late licks.
+        if aligned_data.shape[1] < 180:
+            pad_width = 180 - aligned_data.shape[1]
+            pad_values = np.repeat(aligned_data[:, -1][:, np.newaxis], pad_width, axis=1)
+            aligned_data = np.concatenate([aligned_data, pad_values], axis=1)
+        aligned_traces.append(aligned_data)
 
-#     aligned_traces = np.stack(aligned_traces, axis=1)
-#     aligned_traces.shape
-#     aligned_xarray = xr.DataArray(aligned_traces,
-#                                 dims=['cell', 'trial', 'time'],
-#                                 coords={'time': ('time', aligned_time),
-#                                         'reaction_time': ('trial', reaction_time),}
-#                                 )
+    aligned_traces = np.stack(aligned_traces, axis=1)
+    aligned_traces.shape
+    aligned_xarray = xr.DataArray(aligned_traces,
+                                dims=['cell', 'trial', 'time'],
+                                coords={'time': ('time', aligned_time),
+                                        'reaction_time': ('trial', reaction_time),}
+                                )
 
-#     # Add all other coordinates from the original xarray
-#     for coord in xarray.coords:
-#         if coord not in aligned_xarray.coords:
-#             aligned_xarray.coords[coord] = xarray.coords[coord]
+    # Add all other coordinates from the original xarray
+    for coord in xarray.coords:
+        if coord not in aligned_xarray.coords:
+            aligned_xarray.coords[coord] = xarray.coords[coord]
 
-#     # Save the aligned xarray
-#     save_path = os.path.join(processed_dir, mouse, 'lick_aligned_xarray.nc')
-#     aligned_xarray.to_netcdf(save_path)
-#     print(f'Saved {save_path}')
+    # Save the aligned xarray
+    save_path = os.path.join(processed_dir, mouse, 'lick_aligned_xarray.nc')
+    aligned_xarray.to_netcdf(save_path)
+    print(f'Saved {save_path}')

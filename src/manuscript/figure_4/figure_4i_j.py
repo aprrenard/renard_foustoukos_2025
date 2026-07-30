@@ -32,6 +32,7 @@ sys.path.append('/home/aprenard/repos/fast-learning')
 import src.utils.utils_io as io
 import src.utils.utils_imaging as utils_imaging
 from src.utils.utils_plot import reward_palette
+from src.manuscript.preprocessing.reactivation_preprocessing import select_trials_by_type
 
 
 # ============================================================================
@@ -48,18 +49,57 @@ LMI_POSITIVE_THRESHOLD = 0.975
 LMI_NEGATIVE_THRESHOLD = 0.025
 N_JOBS = 35
 
+# Trial-selection toggle.
+#   True  : no_stim & lick_flag==0 trials, ±2s window (2026 revision baseline)
+#   False : original all no_stim trials, full window (pre-revision baseline)
+# TIME_WINDOW and REACTIVATION_RESULTS_FILE are derived from this flag so the
+# two can never get out of sync — event indices in REACTIVATION_RESULTS_FILE
+# are only valid for the exact trial selection that produced them.
+NO_LICK_ONLY = True
+
 RESULTS_DIR = os.path.join(io.processed_dir, 'reactivation')
-REACTIVATION_RESULTS_FILE = os.path.join(RESULTS_DIR, 'reactivation_results_p99.pkl')
-PARTICIPATION_CSV = os.path.join(RESULTS_DIR, 'cell_participation_rates_per_day.csv')
-MERGED_CSV = os.path.join(RESULTS_DIR, 'participation_lmi_merged.csv')
+NOLICK_RESULTS_DIR = os.path.join(RESULTS_DIR, 'nolick')
+
+if NO_LICK_ONLY:
+    TIME_WINDOW = (-2, 2)
+    REACTIVATION_RESULTS_FILE = os.path.join(NOLICK_RESULTS_DIR, 'reactivation_results_p99.pkl')
+else:
+    TIME_WINDOW = None
+    REACTIVATION_RESULTS_FILE = os.path.join(RESULTS_DIR, 'reactivation_results_p99.pkl')
+
 LMI_RESULTS_CSV = os.path.join(io.processed_dir, 'lmi_results.csv')
 OUTPUT_DIR = os.path.join(io.manuscript_output_dir, 'figure_4', 'output')
 FOLDER = os.path.join(io.processed_dir, 'mice')
 
+# Participation-threshold robustness check: main value (10%) plus the two
+# additional values requested for the revision (20%, 50%).
+PARTICIPATION_THRESHOLDS_TO_CHECK = [0.10, 0.20, 0.50]
+
+
+def _selection_tag():
+    return 'nolick' if NO_LICK_ONLY else 'allnostim'
+
+
+def _thr_tag(threshold):
+    return f'thr{int(round(threshold * 100))}'
+
+
+def _participation_csv(threshold):
+    return os.path.join(
+        RESULTS_DIR,
+        f'cell_participation_rates_per_day_{_selection_tag()}_{_thr_tag(threshold)}.csv')
+
+
+def _merged_csv(threshold):
+    return os.path.join(
+        RESULTS_DIR,
+        f'participation_lmi_merged_{_selection_tag()}_{_thr_tag(threshold)}.csv')
+
+
 # Execution mode
 #   'compute' : run participation-rate pipeline, save CSVs, then plot
 #   'plot'    : load previously saved CSVs and plot only
-MODE = 'plot'
+MODE = 'compute'
 
 
 # ============================================================================
@@ -104,12 +144,19 @@ def _load_reactivation_results(results_file):
     return r_plus, r_minus
 
 
-def _extract_event_responses(mouse, day, preloaded_events):
-    """Extract per-cell dF/F responses around pre-computed reactivation events."""
+def _extract_event_responses(mouse, day, preloaded_events,
+                              participation_threshold=PARTICIPATION_THRESHOLD):
+    """Extract per-cell dF/F responses around pre-computed reactivation events.
+
+    Trial selection must exactly match the one used to detect
+    preloaded_events (reactivation_preprocessing_nolick.py), since event_idx
+    is an index into that selection's concatenated trial/time axes.
+    """
     xarr = utils_imaging.load_mouse_xarray(
         mouse, FOLDER, 'tensor_xarray_learning_data.nc', substracted=True)
     xarr_day = xarr.sel(trial=xarr['day'] == day)
-    nostim = xarr_day.sel(trial=xarr_day['no_stim'] == 1)
+    nostim, _ = select_trials_by_type(
+        xarr_day, no_lick_only=NO_LICK_ONLY, time_window=TIME_WINDOW)
 
     if len(nostim.trial) < 10:
         return None
@@ -127,7 +174,7 @@ def _extract_event_responses(mouse, day, preloaded_events):
             continue
         window_data  = data_3d[:, trial_idx, time_idx - win:time_idx + win + 1]
         avg_response = np.mean(window_data, axis=1)
-        participates = avg_response >= PARTICIPATION_THRESHOLD
+        participates = avg_response >= participation_threshold
         for icell in range(n_cells):
             rows.append({
                 'mouse_id': mouse, 'day': day, 'roi': roi_list[icell],
@@ -149,7 +196,8 @@ def _compute_participation_rate(responses_df):
     return grouped
 
 
-def _process_mouse_participation(mouse, preloaded_results):
+def _process_mouse_participation(mouse, preloaded_results,
+                                  participation_threshold=PARTICIPATION_THRESHOLD):
     """Compute participation rates across all days for one mouse."""
     all_responses = []
     for day in DAYS:
@@ -157,7 +205,8 @@ def _process_mouse_participation(mouse, preloaded_results):
         if events is None or len(events) == 0:
             continue
         try:
-            resp_df = _extract_event_responses(mouse, day, events)
+            resp_df = _extract_event_responses(
+                mouse, day, events, participation_threshold=participation_threshold)
             if resp_df is not None and len(resp_df) > 0:
                 all_responses.append(resp_df)
         except Exception as e:
@@ -249,14 +298,15 @@ def _significance_stars(p):
 # Data loading / computation
 # ============================================================================
 
-def _compute_participation_data():
+def _compute_participation_data(participation_threshold=PARTICIPATION_THRESHOLD):
     """Run the full participation-rate computation pipeline.
 
     1. Load pre-computed reactivation events.
     2. Compute per-cell participation rates per day (parallel across mice).
     3. Aggregate across days and merge with LMI data.
 
-    Saves PARTICIPATION_CSV and MERGED_CSV to RESULTS_DIR.
+    Saves the per-day and merged CSVs (tagged with participation_threshold)
+    to RESULTS_DIR.
 
     Returns
     -------
@@ -267,9 +317,12 @@ def _compute_participation_data():
     all_results = {**r_plus, **r_minus}
     all_mice = list(all_results.keys())
 
-    print(f"\nComputing participation rates for {len(all_mice)} mice...")
+    print(f"\nComputing participation rates for {len(all_mice)} mice "
+          f"(participation_threshold={participation_threshold})...")
     results_list = Parallel(n_jobs=N_JOBS, verbose=10)(
-        delayed(_process_mouse_participation)(mouse, all_results.get(mouse))
+        delayed(_process_mouse_participation)(
+            mouse, all_results.get(mouse),
+            participation_threshold=participation_threshold)
         for mouse in all_mice
     )
 
@@ -279,24 +332,26 @@ def _compute_participation_data():
     per_day_df = pd.concat(all_data, ignore_index=True)
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    per_day_df.to_csv(PARTICIPATION_CSV, index=False)
+    per_day_df.to_csv(_participation_csv(participation_threshold), index=False)
 
     aggregated_df = _aggregate_across_days(per_day_df)
     merged_df = _load_and_match_lmi_data(aggregated_df)
-    merged_df.to_csv(MERGED_CSV, index=False)
+    merged_df.to_csv(_merged_csv(participation_threshold), index=False)
 
     return merged_df, per_day_df
 
 
-def _load_participation_data():
+def _load_participation_data(participation_threshold=PARTICIPATION_THRESHOLD):
     """Load pre-computed participation data from CSVs."""
-    for path in [PARTICIPATION_CSV, MERGED_CSV]:
+    participation_csv = _participation_csv(participation_threshold)
+    merged_csv = _merged_csv(participation_threshold)
+    for path in [participation_csv, merged_csv]:
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"Pre-computed data not found: {path}\n"
                 "Run with MODE='compute' first.")
-    merged_df = pd.read_csv(MERGED_CSV)
-    per_day_df = pd.read_csv(PARTICIPATION_CSV)
+    merged_df = pd.read_csv(merged_csv)
+    per_day_df = pd.read_csv(participation_csv)
     print(f"Loaded {len(merged_df)} cells and {len(per_day_df)} cell-day records.")
     return merged_df, per_day_df
 
@@ -562,18 +617,29 @@ def panel_j_participation_across_days(
 
 if __name__ == '__main__':
     print(f"Mode:             {MODE}")
+    print(f"Trial selection:  {_selection_tag()} (NO_LICK_ONLY={NO_LICK_ONLY}, TIME_WINDOW={TIME_WINDOW})")
     print(f"Output directory: {OUTPUT_DIR}")
+    print(f"Reactivation results: {REACTIVATION_RESULTS_FILE}")
+    print(f"Participation thresholds to check: {PARTICIPATION_THRESHOLDS_TO_CHECK}")
 
-    if MODE == 'compute':
-        merged_df, per_day_df = _compute_participation_data()
-    elif MODE == 'plot':
-        merged_df, per_day_df = _load_participation_data()
-    else:
-        raise ValueError(f"Unknown MODE '{MODE}'. Use 'compute' or 'plot'.")
+    for participation_threshold in PARTICIPATION_THRESHOLDS_TO_CHECK:
+        tag = _thr_tag(participation_threshold)
+        print(f"\n--- participation_threshold={participation_threshold} ({tag}) ---")
 
-    merged_df = _prepare_data(merged_df)
-    print(f"\nDataset: {len(merged_df)} cells, {len(per_day_df)} cell-day records, "
-          f"{merged_df['mouse_id'].nunique()} mice")
+        if MODE == 'compute':
+            merged_df, per_day_df = _compute_participation_data(
+                participation_threshold=participation_threshold)
+        elif MODE == 'plot':
+            merged_df, per_day_df = _load_participation_data(
+                participation_threshold=participation_threshold)
+        else:
+            raise ValueError(f"Unknown MODE '{MODE}'. Use 'compute' or 'plot'.")
 
-    panel_i_participation_vs_lmi(merged_df, filename='figure_4i')
-    panel_j_participation_across_days(merged_df, per_day_df, filename='figure_4j')
+        merged_df = _prepare_data(merged_df)
+        print(f"Dataset: {len(merged_df)} cells, {len(per_day_df)} cell-day records, "
+              f"{merged_df['mouse_id'].nunique()} mice")
+
+        panel_i_participation_vs_lmi(
+            merged_df, filename=f'figure_4i_{_selection_tag()}_{tag}')
+        panel_j_participation_across_days(
+            merged_df, per_day_df, filename=f'figure_4j_{_selection_tag()}_{tag}')

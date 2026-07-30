@@ -182,7 +182,7 @@ def shape_features_matrix(mouse_list, session_list, data_dir, trial_type, n_tria
     return X
 
 
-def compute_roc(data_pre, data_post, nshuffles=1000, n_jobs=-1):
+def compute_roc(data_pre, data_post, nshuffles=1000, n_jobs=-1, return_shuffles=False):
     '''
     Compute ROC analysis and Learning modulation index for each cell in data.
     data_pre: np array of shape (cell, trial).
@@ -191,10 +191,15 @@ def compute_roc(data_pre, data_post, nshuffles=1000, n_jobs=-1):
     LMI are computed on days D-2, D-1 together VERSUS D+1, D+2 together.
     nshuffles: number of shuffles for significance testing.
     n_jobs: number of parallel jobs for shuffling (default: use all cores).
+    return_shuffles: if True, also return the per-cell, per-shuffle null LMI
+        values ((roc_auc_shuffle - 0.5) * 2), shape (ncell, nshuffles), e.g.
+        to build a null LMI distribution rather than just a significance
+        percentile. Default False preserves the original 2-value return.
     '''
     ncell = data_pre.shape[0]
     lmi = np.full(ncell, np.nan)
     lmi_p = np.full(ncell, np.nan)
+    lmi_shuffles = np.full((ncell, nshuffles), np.nan) if return_shuffles and nshuffles else None
 
     def shuffle_auc(y, X, ishuffle):
         y_shuffle = shuffle(y, random_state=ishuffle)
@@ -214,13 +219,17 @@ def compute_roc(data_pre, data_post, nshuffles=1000, n_jobs=-1):
 
         # Parallelize shuffles
         if nshuffles:
-            roc_auc_shuffle = Parallel(n_jobs=n_jobs)(
+            roc_auc_shuffle = np.array(Parallel(n_jobs=n_jobs)(
                 delayed(shuffle_auc)(y, X, ishuffle) for ishuffle in range(nshuffles)
-            )
+            ))
             lmi_p[icell] = percentileofscore(roc_auc_shuffle, roc_auc) / 100
+            if return_shuffles:
+                lmi_shuffles[icell] = (roc_auc_shuffle - 0.5) * 2
         else:
             lmi_p[icell] = np.nan
     print('')
+    if return_shuffles:
+        return lmi, lmi_p, lmi_shuffles
     return lmi, lmi_p
 
 

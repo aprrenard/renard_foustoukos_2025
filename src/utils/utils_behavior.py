@@ -11,10 +11,9 @@ import pymc as pm
 import scipy as sp
 
 sys.path.append(r'/home/aprenard/repos/fast-learning')
-sys.path.append(r'/home/aprenard/repos/NWB_analysis')
 import src.utils.utils_io as io
 from src.utils.utils_plot import *
-from nwb_wrappers import nwb_reader_functions as nwb_read
+from cicada_nwb import NWBSession
 from scipy.stats import mannwhitneyu, wilcoxon
 from matplotlib.colors import Normalize
 from scipy.ndimage import gaussian_filter1d
@@ -26,14 +25,14 @@ def make_behavior_table(nwb_list, session_list, db_path, cut_session, stop_flag_
         start_stop, trial_indices = io.read_stop_flags_and_indices_yaml(stop_flag_yaml, trial_indices_yaml)
     table = []
     for nwb, session in zip(nwb_list, session_list):
-        df = nwb_read.get_trial_table(nwb)
-        df = df.reset_index()
-        if 'trial_id' not in df.columns:
-            df.rename(columns={'id': 'trial_id'}, inplace=True)
+        with NWBSession(nwb) as nwb_session:
+            df = nwb_session.behavior.get_trial_table().reset_index()
+            if 'trial_id' not in df.columns:
+                df.rename(columns={'id': 'trial_id'}, inplace=True)
+            behavior_type, day = nwb_session.petersen.get_bhv_type_and_training_day_index()
         reward_group = io.get_reward_group_from_db(db_path, session)
-        metadata = nwb_read.get_session_metadata(nwb)
-        df['day'] = metadata['day']
-        df['behavior_type'] = metadata['behavior_type']
+        df['day'] = day
+        df['behavior_type'] = behavior_type
         df['session_id'] = session
         df['mouse_id'] = session[:5]
         df['reward_group'] = reward_group

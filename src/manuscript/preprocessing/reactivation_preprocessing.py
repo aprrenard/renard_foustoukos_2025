@@ -141,9 +141,15 @@ def compute_template_correlation(data, template):
     return correlations
 
 
-def select_trials_by_type(xarray_day):
-    """Select no-stim trials only."""
-    selected = xarray_day.sel(trial=xarray_day['no_stim'] == 1)
+def select_trials_by_type(xarray_day, no_lick_only=False, time_window=None):
+    """Select no-stim trials, optionally restricted to no-lick (correct
+    rejection) trials and/or a time window around no-stim onset."""
+    mask = xarray_day['no_stim'] == 1
+    if no_lick_only:
+        mask = mask & (xarray_day['lick_flag'] == 0)
+    selected = xarray_day.sel(trial=mask)
+    if time_window is not None:
+        selected = selected.sel(time=slice(time_window[0], time_window[1]))
     return selected, len(selected.trial)
 
 
@@ -320,7 +326,8 @@ def get_threshold_for_mouse_day(threshold_dict, mouse, day,
 # Reactivation event detection (per mouse)
 # ============================================================================
 
-def analyze_mouse_reactivation(mouse, days=DAYS, verbose=False, threshold_dict=None):
+def analyze_mouse_reactivation(mouse, days=DAYS, verbose=False, threshold_dict=None,
+                                no_lick_only=False, time_window=None):
     """
     Detect reactivation events for a single mouse across all days.
 
@@ -338,7 +345,8 @@ def analyze_mouse_reactivation(mouse, days=DAYS, verbose=False, threshold_dict=N
                 mouse, folder, 'tensor_xarray_learning_data.nc', substracted=False)
             xarray_day = xarray_learning.sel(trial=xarray_learning['day'] == day)
 
-            selected_trials, n_selected_trials = select_trials_by_type(xarray_day)
+            selected_trials, n_selected_trials = select_trials_by_type(
+                xarray_day, no_lick_only=no_lick_only, time_window=time_window)
             if n_selected_trials == 0:
                 continue
 
@@ -463,7 +471,8 @@ def compute_surrogate_thresholds(data, template, n_surrogates=1000, min_shift=0,
 
 
 def _analyze_surrogates_per_day(mouse, days=DAYS, threshold_dff=THRESHOLD_DFF,
-                                 n_surrogates=1000, percentiles=(99,), verbose=False):
+                                 n_surrogates=1000, percentiles=(99,), verbose=False,
+                                 no_lick_only=False, time_window=None):
     """
     Compute per-day surrogate thresholds for one mouse.
     Returns (results_dfs, all_surrogate_data) where results_dfs is {percentile: DataFrame}.
@@ -483,8 +492,8 @@ def _analyze_surrogates_per_day(mouse, days=DAYS, threshold_dff=THRESHOLD_DFF,
             xarray_learning = utils_imaging.load_mouse_xarray(
                 mouse, folder, 'tensor_xarray_learning_data.nc', substracted=False)
             xarray_day = xarray_learning.sel(trial=xarray_learning['day'] == day)
-            nostim = xarray_day.sel(trial=xarray_day['no_stim'] == 1)
-            n_trials = len(nostim.trial)
+            nostim, n_trials = select_trials_by_type(
+                xarray_day, no_lick_only=no_lick_only, time_window=time_window)
             if n_trials < 5:
                 continue
 
@@ -527,17 +536,19 @@ def _analyze_surrogates_per_day(mouse, days=DAYS, threshold_dff=THRESHOLD_DFF,
 
 
 def _process_mouse_per_day(mouse, days, threshold_dff, n_surrogates,
-                            percentiles=(99,), verbose=False):
+                            percentiles=(99,), verbose=False,
+                            no_lick_only=False, time_window=None):
     """Parallel wrapper for per-day surrogates."""
     results_dfs, surrogate_data = _analyze_surrogates_per_day(
         mouse, days=days, threshold_dff=threshold_dff,
-        n_surrogates=n_surrogates, percentiles=percentiles, verbose=verbose)
+        n_surrogates=n_surrogates, percentiles=percentiles, verbose=verbose,
+        no_lick_only=no_lick_only, time_window=time_window)
     return (mouse, results_dfs, surrogate_data)
 
 
 def _analyze_surrogates_per_mouse(mouse, threshold_dff=THRESHOLD_DFF,
                                    n_surrogates=1000, percentiles=(99,),
-                                   verbose=False):
+                                   verbose=False, no_lick_only=False, time_window=None):
     """
     Compute single per-mouse surrogate threshold using pre-learning days pooled.
     Returns (results_dfs, surrogate_data) where results_dfs is {percentile: DataFrame}.
@@ -565,8 +576,9 @@ def _analyze_surrogates_per_mouse(mouse, threshold_dff=THRESHOLD_DFF,
                 continue
 
             xarray_day = xarray_learning.sel(trial=xarray_learning['day'] == day)
-            nostim = xarray_day.sel(trial=xarray_day['no_stim'] == 1)
-            if len(nostim.trial) < 5:
+            nostim, n_nostim_trials = select_trials_by_type(
+                xarray_day, no_lick_only=no_lick_only, time_window=time_window)
+            if n_nostim_trials < 5:
                 continue
 
             n_cells = nostim.shape[0]
@@ -628,11 +640,13 @@ def _analyze_surrogates_per_mouse(mouse, threshold_dff=THRESHOLD_DFF,
 
 
 def _process_mouse_per_mouse(mouse, threshold_dff, n_surrogates,
-                              percentiles=(99,), verbose=False):
+                              percentiles=(99,), verbose=False,
+                              no_lick_only=False, time_window=None):
     """Parallel wrapper for per-mouse surrogates."""
     results_dfs, surrogate_data = _analyze_surrogates_per_mouse(
         mouse, threshold_dff=threshold_dff,
-        n_surrogates=n_surrogates, percentiles=percentiles, verbose=verbose)
+        n_surrogates=n_surrogates, percentiles=percentiles, verbose=verbose,
+        no_lick_only=no_lick_only, time_window=time_window)
     return (mouse, results_dfs, surrogate_data)
 
 
@@ -667,6 +681,8 @@ def run_surrogates_per_day(
     n_surrogates=N_SURROGATES,
     percentiles=PERCENTILES,
     n_jobs=N_JOBS,
+    no_lick_only=False,
+    time_window=None,
 ):
     """
     Compute per-day surrogate thresholds for all mice in parallel and save CSVs.
@@ -684,6 +700,7 @@ def run_surrogates_per_day(
         delayed(_process_mouse_per_day)(
             mouse, days, threshold_dff, n_surrogates,
             percentiles=percentiles, verbose=False,
+            no_lick_only=no_lick_only, time_window=time_window,
         )
         for mouse in mice
     )
@@ -714,6 +731,8 @@ def run_surrogates_per_mouse(
     n_surrogates=N_SURROGATES,
     percentiles=PERCENTILES,
     n_jobs=N_JOBS,
+    no_lick_only=False,
+    time_window=None,
 ):
     """
     Compute per-mouse surrogate thresholds using pre-learning days, in parallel.
@@ -731,6 +750,7 @@ def run_surrogates_per_mouse(
         delayed(_process_mouse_per_mouse)(
             mouse, threshold_dff, n_surrogates,
             percentiles=percentiles, verbose=False,
+            no_lick_only=no_lick_only, time_window=time_window,
         )
         for mouse in mice
     )
@@ -762,6 +782,8 @@ def run_reactivation_detection(
     percentile=PERCENTILE_TO_USE,
     threshold_corr=THRESHOLD_CORR,
     n_jobs=N_JOBS,
+    no_lick_only=False,
+    time_window=None,
 ):
     """
     Detect reactivation events for all mice and save results.
@@ -800,6 +822,7 @@ def run_reactivation_detection(
         results_list = Parallel(n_jobs=n_jobs, verbose=10)(
             delayed(analyze_mouse_reactivation)(
                 mouse, verbose=False, threshold_dict=threshold_dict,
+                no_lick_only=no_lick_only, time_window=time_window,
             )
             for mouse in mice_list
         )
@@ -812,7 +835,9 @@ def run_reactivation_detection(
         'r_plus_results': r_plus_results,
         'r_minus_results': r_minus_results,
         'parameters': {
-            'trial_type': 'no_stim',
+            'trial_type': 'no_stim_correct_rejection' if no_lick_only else 'no_stim',
+            'no_lick_only': no_lick_only,
+            'time_window': time_window,
             'use_surrogate_thresholds': use_surrogate_thresholds,
             'percentile': percentile,
             'threshold_corr': threshold_corr,
